@@ -211,7 +211,6 @@ def test_permanent_4_by_4():
 
     rows = np.array([3, 0, 0, 1], dtype=np.uint64)
     cols = np.array([0, 0, 3, 1], dtype=np.uint64)
-    print(perm(unitary, rows, cols))
     assert np.isclose(
         perm(unitary, rows, cols),
         0.4302957973670928 + 0.3986355418194044j,
@@ -275,7 +274,6 @@ def test_permanent_6_by_6():
 
     output = np.array([2, 1, 3, 0, 1, 2], dtype=np.uint64)
     input = np.array([1, 1, 0, 3, 2, 2], dtype=np.uint64)
-    print(perm(interferometer, input, output))
     assert np.isclose(
         perm(interferometer, input, output),
         0.13160241373727416 + 0.36535625772184577j,
