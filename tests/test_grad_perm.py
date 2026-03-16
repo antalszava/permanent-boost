@@ -361,3 +361,26 @@ def test_grad_perm_6_by_6():
             ]
         ),
     )
+
+
+def test_jacobian_no_holomorphic():
+    def perm_wrapper(primal, rows, cols):
+        res = perm(primal, rows, cols)
+        return res.real, res.imag
+
+    mat = jax.numpy.array([[ 0.5      +0.j, -0.8660254+0.j],
+       [ 0.8660254+0.j,  0.5      +0.j]], dtype=jax.numpy.complex128)
+
+    rows = jax.numpy.array([2, 0], jax.numpy.uint64)
+    cols = jax.numpy.array([2, 0], jax.numpy.uint64)
+
+    jacobian = jax.jacobian(perm_wrapper)(mat, rows, cols)
+
+    real_expected = np.array([[2.+0.j, 0.+0.j],
+       [0.+0.j, 0.+0.j]], dtype=np.complex128)
+    assert np.allclose(jacobian[0], real_expected)
+
+
+    imag_expected = np.array([[0.-2.j, 0.+0.j],
+       [0.+0.j, 0.+0.j]], dtype=np.complex128)
+    assert np.allclose(jacobian[1], imag_expected)
