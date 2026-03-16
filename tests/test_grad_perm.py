@@ -384,3 +384,4 @@ def test_jacobian_no_holomorphic():
     imag_expected = np.array([[0.-2.j, 0.+0.j],
        [0.+0.j, 0.+0.j]], dtype=np.complex128)
     assert np.allclose(jacobian[1], imag_expected)
+
