@@ -69,12 +69,12 @@ def perm_fwd(A, rows, cols):
     return y, (res, A, rows, cols)
 
 
-def perm_bwd(res, _):
+def perm_bwd(res, cot):
     res, A, rows, cols = res
 
     def impl(target_name):
         return lambda: (
-            jax.ffi.ffi_call(
+            cot * jax.ffi.ffi_call(
                 target_name,
                 jax.ShapeDtypeStruct(A.shape, A.dtype),
                 vmap_method="broadcast_all",
