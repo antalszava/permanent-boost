@@ -18,6 +18,7 @@ ffi::Error PermFwdImpl(cudaStream_t stream, ffi::Buffer<ffi::C128> A, ffi::Buffe
 
 ffi::Error PermBwdImpl(cudaStream_t stream, ffi::Buffer<ffi::C128> res, ffi::Buffer<ffi::C128> A,
                        ffi::Buffer<ffi::U64> rows, ffi::Buffer<ffi::U64> cols,
+                       ffi::Buffer<ffi::C128> cotangent,
                        ffi::ResultBuffer<ffi::C128> ct_x);
 
 #endif // KERNELS_H_

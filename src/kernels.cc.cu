@@ -366,6 +366,7 @@ ffi::Error PermBwdImpl(cudaStream_t stream, ffi::Buffer<ffi::C128> res_grad,
                        ffi::Buffer<ffi::C128> A,
                        ffi::Buffer<ffi::U64> rows,
                        ffi::Buffer<ffi::U64> cols,
+                       ffi::Buffer<ffi::C128> cotangent,
                        ffi::ResultBuffer<ffi::C128> ct_x)
 {
   auto [total_size, n] = get_dims(A);

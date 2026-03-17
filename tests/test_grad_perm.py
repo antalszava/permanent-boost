@@ -2,6 +2,7 @@ from sooki import perm
 import numpy as np
 import jax
 
+jax.config.update('jax_platforms', 'cpu')
 
 def test_grad_perm_trivial_case():
     matrix = np.array([[1, 2, 3], [4, 5, 6], [7, 8, 9]], dtype=np.complex128)
@@ -383,5 +384,6 @@ def test_jacobian_no_holomorphic():
 
     imag_expected = np.array([[0.-2.j, 0.+0.j],
        [0.+0.j, 0.+0.j]], dtype=np.complex128)
+    print(jacobian[1])
     assert np.allclose(jacobian[1], imag_expected)
 

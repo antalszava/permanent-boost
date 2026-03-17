@@ -29,6 +29,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(PermBwd, PermBwdImpl,
                                   .Arg<ffi::Buffer<ffi::C128>>()            // A
                                   .Arg<ffi::Buffer<ffi::U64>>()             // rows
                                   .Arg<ffi::Buffer<ffi::U64>>()             // cols
+                                  .Arg<ffi::Buffer<ffi::C128>>()            // cotangent
                                   .Ret<ffi::Buffer<ffi::C128>>(),           // ct_x
                               {xla::ffi::Traits::kCmdBufferCompatible});    // cudaGraph enabled
 

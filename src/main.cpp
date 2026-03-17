@@ -93,6 +93,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(PermFwd, PermFwdImpl,
 
 void ComputePermBwd(std::complex<double> res, Matrix<std::complex<double>> &A,
                     std::vector<int> &rows, std::vector<int> &cols,
+                    const std::vector<std::complex<double>> &cotangent,
                     std::complex<double> *ct_x)
 {
 
@@ -102,13 +103,17 @@ void ComputePermBwd(std::complex<double> res, Matrix<std::complex<double>> &A,
   {
     for (int64_t j = 0; j < grad.cols; ++j)
     {
-      ct_x[i * A.cols + j] = grad(i, j);
+      //ct_x[i * A.cols + j] = cotangent * grad(i, j);
+
+      std::cout << cotangent.at(i) << " * " << grad(i, j) << std::endl;
+      ct_x[i * A.cols + j] = cotangent.at(i) * grad(i, j);
     }
   }
 }
 
 ffi::Error PermBwdImpl(ffi::Buffer<ffi::C128> res, ffi::Buffer<ffi::C128> A,
                        ffi::Buffer<ffi::U64> rows, ffi::Buffer<ffi::U64> cols,
+                       ffi::Buffer<ffi::C128> cotangent,
                        ffi::ResultBuffer<ffi::C128> ct_x)
 {
   auto [total_size, n] = get_dims(A);
@@ -122,7 +127,10 @@ ffi::Error PermBwdImpl(ffi::Buffer<ffi::C128> res, ffi::Buffer<ffi::C128> A,
 
   Matrix<std::complex<double>> matrix(total_size / n, n, &(A.typed_data()[0]));
 
+  std::vector<std::complex<double>> cot_vector(cotangent.typed_data(), cotangent.typed_data() + n);
+
   ComputePermBwd(res.typed_data()[0], matrix, row_mult, col_mult,
+                  cot_vector,
                  &(ct_x->typed_data()[0]));
 
   return ffi::Error::Success();
@@ -134,6 +142,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(PermBwd, PermBwdImpl,
                                   .Arg<ffi::Buffer<ffi::C128>>() // A
                                   .Arg<ffi::Buffer<ffi::U64>>()  // rows
                                   .Arg<ffi::Buffer<ffi::U64>>()  // cols
+                                  .Arg<ffi::Buffer<ffi::C128>>() // cotangent
                                   .Ret<ffi::Buffer<ffi::C128>>() // ct_x
 );
 
