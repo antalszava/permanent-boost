@@ -91,22 +91,18 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(PermFwd, PermFwdImpl,
                                   .Ret<ffi::Buffer<ffi::C128>>()
                                   .Ret<ffi::Buffer<ffi::C128>>());
 
-void ComputePermBwd(std::complex<double> res, Matrix<std::complex<double>> &A,
+void ComputePermBwd(Matrix<std::complex<double>> &A,
                     std::vector<int> &rows, std::vector<int> &cols,
-                    const std::vector<std::complex<double>> &cotangent,
+                    std::complex<double> cotangent,
                     std::complex<double> *ct_x)
 {
-
   Matrix<std::complex<double>> grad = grad_perm(A, rows, cols);
 
-  for (int64_t i = 0; i < grad.rows; ++i)
+  for (int64_t i = 0; i < static_cast<int64_t>(grad.rows); ++i)
   {
-    for (int64_t j = 0; j < grad.cols; ++j)
+    for (int64_t j = 0; j < static_cast<int64_t>(grad.cols); ++j)
     {
-      //ct_x[i * A.cols + j] = cotangent * grad(i, j);
-
-      std::cout << cotangent.at(i) << " * " << grad(i, j) << std::endl;
-      ct_x[i * A.cols + j] = cotangent.at(i) * grad(i, j);
+      ct_x[i * A.cols + j] = cotangent * grad(i, j);
     }
   }
 }
@@ -116,22 +112,40 @@ ffi::Error PermBwdImpl(ffi::Buffer<ffi::C128> res, ffi::Buffer<ffi::C128> A,
                        ffi::Buffer<ffi::C128> cotangent,
                        ffi::ResultBuffer<ffi::C128> ct_x)
 {
-  auto [total_size, n] = get_dims(A);
-  if (n == 0)
+  auto A_dims = A.dimensions();
+  int64_t ndim = static_cast<int64_t>(A_dims.size());
+
+  if (ndim < 2)
   {
-    return ffi::Error::InvalidArgument("RmsNormBwd inputs must be arrays");
+    return ffi::Error::InvalidArgument("PermBwd: A must be at least 2D");
   }
 
-  std::vector<int> row_mult(rows.typed_data(), rows.typed_data() + n);
-  std::vector<int> col_mult(cols.typed_data(), cols.typed_data() + n);
+  int64_t n_cols = A_dims[ndim - 1];
+  int64_t n_rows = A_dims[ndim - 2];
+  int64_t batch_size = A.element_count() / (n_rows * n_cols);
 
-  Matrix<std::complex<double>> matrix(total_size / n, n, &(A.typed_data()[0]));
+#ifdef _OPENMP
+  const int64_t max_threads = omp_get_max_threads();
+#else
+  const int64_t max_threads = 1;
+#endif
+  int64_t n_threads = std::min(max_threads, batch_size);
+#pragma omp parallel for num_threads(n_threads)
+  for (int64_t b = 0; b < batch_size; ++b)
+  {
+    std::vector<int> row_mult(rows.typed_data() + b * n_rows,
+                              rows.typed_data() + (b + 1) * n_rows);
+    std::vector<int> col_mult(cols.typed_data() + b * n_cols,
+                              cols.typed_data() + (b + 1) * n_cols);
 
-  std::vector<std::complex<double>> cot_vector(cotangent.typed_data(), cotangent.typed_data() + n);
+    Matrix<std::complex<double>> matrix(n_rows, n_cols,
+        A.typed_data() + b * n_rows * n_cols);
 
-  ComputePermBwd(res.typed_data()[0], matrix, row_mult, col_mult,
-                  cot_vector,
-                 &(ct_x->typed_data()[0]));
+    std::complex<double> cot = cotangent.typed_data()[b];
+
+    ComputePermBwd(matrix, row_mult, col_mult, cot,
+                   ct_x->typed_data() + b * n_rows * n_cols);
+  }
 
   return ffi::Error::Success();
 }
