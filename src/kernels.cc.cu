@@ -369,155 +369,176 @@ ffi::Error PermBwdImpl(cudaStream_t stream, ffi::Buffer<ffi::C128> res_grad,
                        ffi::Buffer<ffi::C128> cotangent,
                        ffi::ResultBuffer<ffi::C128> ct_x)
 {
-  auto [total_size, n] = get_dims(A);
+  auto A_dims = A.dimensions();
+  int64_t ndim = static_cast<int64_t>(A_dims.size());
+
+  if (ndim < 2)
+  {
+    cudaMemsetAsync(ct_x->typed_data(), 0, sizeof(cuDoubleComplex), stream);
+    return ffi::Error::Success();
+  }
+
+  int64_t n = A_dims[ndim - 1];
+  int64_t batch_size = A.element_count() / (n * n);
+
   if (n == 0)
   {
-    cudaMemsetAsync(ct_x->typed_data(), 0, total_size * sizeof(cuDoubleComplex), stream);
+    // No need to compute anything for empty matrices; the sub-permanent of an empty matrix is 1, but the gradient will be 0 since it will be multiplied by cotangent which is 0 for empty matrices. Just set output to 0 and return.
     return ffi::Error::Success();
   }
-  size_t rows_size = rows.element_count();
-  size_t cols_size = cols.element_count();
-  if (n != rows_size || n != cols_size)
-  {
-    return ffi::Error::InvalidArgument("Matrix dimension mismatch with row/col vector sizes in PermBwdImpl.");
-  }
-
-  if (n == 1)
-  {
-    cuDoubleComplex ma = make_cuDoubleComplex(1.0, 0.0);
-    cudaMemcpy(ct_x->typed_data(), &ma, sizeof(cuDoubleComplex), cudaMemcpyDeviceToDevice);
-    return ffi::Error::Success();
-  }
-
-  std::vector<uint64_t> h_rows(n);
-  cudaError_t cuda_err = cudaMemcpy(h_rows.data(), rows.typed_data(), n * sizeof(uint64_t), cudaMemcpyDeviceToHost);
-  if (cuda_err != cudaSuccess)
-    return ffi::Error::Internal(std::string("CUDA memcpy error (h_rows): ") + cudaGetErrorString(cuda_err));
-
-  std::vector<uint64_t> h_cols(n);
-  cuda_err = cudaMemcpy(h_cols.data(), cols.typed_data(), n * sizeof(uint64_t), cudaMemcpyDeviceToHost);
-  if (cuda_err != cudaSuccess)
-    return ffi::Error::Internal(std::string("CUDA memcpy error (h_cols): ") + cudaGetErrorString(cuda_err));
 
   cuDoubleComplex *A_data = reinterpret_cast<cuDoubleComplex *>(A.typed_data());
   cuDoubleComplex *ct_x_data = reinterpret_cast<cuDoubleComplex *>(ct_x->typed_data());
+  cuDoubleComplex *cotangent_data = reinterpret_cast<cuDoubleComplex *>(cotangent.typed_data());
+  uint64_t *rows_data = rows.typed_data();
+  uint64_t *cols_data = cols.typed_data();
 
-  cuda_err = cudaMemsetAsync(ct_x_data, 0, n * n * sizeof(cuDoubleComplex), stream);
+  cudaError_t cuda_err = cudaMemsetAsync(ct_x_data, 0, batch_size * n * n * sizeof(cuDoubleComplex), stream);
   if (cuda_err != cudaSuccess)
     return ffi::Error::Internal(std::string("CUDA memset error (ct_x): ") + cudaGetErrorString(cuda_err));
 
-  for (size_t i = 0; i < n; ++i)
+  for (int64_t b = 0; b < batch_size; ++b)
   {
-    if (h_rows[i] == 0)
-      continue;
+    cuDoubleComplex *batch_A = A_data + b * n * n;
+    cuDoubleComplex *batch_ct_x = ct_x_data + b * n * n;
+    uint64_t *batch_rows = rows_data + b * n;
+    uint64_t *batch_cols = cols_data + b * n;
 
-    for (size_t j = 0; j < n; ++j)
+    std::vector<uint64_t> h_rows(n);
+    cuda_err = cudaMemcpy(h_rows.data(), batch_rows, n * sizeof(uint64_t), cudaMemcpyDeviceToHost);
+    if (cuda_err != cudaSuccess)
+      return ffi::Error::Internal(std::string("CUDA memcpy error (h_rows): ") + cudaGetErrorString(cuda_err));
+
+    std::vector<uint64_t> h_cols(n);
+    cuda_err = cudaMemcpy(h_cols.data(), batch_cols, n * sizeof(uint64_t), cudaMemcpyDeviceToHost);
+    if (cuda_err != cudaSuccess)
+      return ffi::Error::Internal(std::string("CUDA memcpy error (h_cols): ") + cudaGetErrorString(cuda_err));
+
+    cuDoubleComplex h_cot;
+    cuda_err = cudaMemcpy(&h_cot, cotangent_data + b, sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost);
+    if (cuda_err != cudaSuccess)
+      return ffi::Error::Internal(std::string("CUDA memcpy error (h_cot): ") + cudaGetErrorString(cuda_err));
+
+    if (n == 1)
     {
-      if (h_cols[j] == 0)
+      if (h_rows[0] > 0 && h_cols[0] > 0)
+      {
+        // sub-permanent of empty matrix is 1; scale by rows[0]*cols[0] then by cotangent
+        double scale = static_cast<double>(h_rows[0]) * static_cast<double>(h_cols[0]);
+        cuDoubleComplex val = cuCmul(h_cot, make_cuDoubleComplex(scale, 0.0));
+        cuda_err = cudaMemcpy(batch_ct_x, &val, sizeof(cuDoubleComplex), cudaMemcpyHostToDevice);
+        if (cuda_err != cudaSuccess)
+          return ffi::Error::Internal(std::string("CUDA memcpy error (n==1): ") + cudaGetErrorString(cuda_err));
+      }
+      continue;
+    }
+
+    for (size_t i = 0; i < static_cast<size_t>(n); ++i)
+    {
+      if (h_rows[i] == 0)
         continue;
 
-      std::vector<uint64_t> grad_rows_host = h_rows;
-      std::vector<uint64_t> grad_cols_host = h_cols;
-      grad_rows_host[i] -= 1;
-      grad_cols_host[j] -= 1;
-
-      uint64_t *d_grad_rows = nullptr;
-      uint64_t *d_grad_cols = nullptr;
-      cuDoubleComplex *d_entry_result = nullptr;
-
-      cuda_err = cudaMalloc(&d_grad_rows, n * sizeof(uint64_t));
-      if (cuda_err != cudaSuccess)
+      for (size_t j = 0; j < static_cast<size_t>(n); ++j)
       {
-        return ffi::Error::Internal(std::string("CUDA malloc error (d_grad_rows): ") + cudaGetErrorString(cuda_err));
-      }
+        if (h_cols[j] == 0)
+          continue;
 
-      cuda_err = cudaMalloc(&d_grad_cols, n * sizeof(uint64_t));
-      if (cuda_err != cudaSuccess)
-      {
-        cudaFree(d_grad_rows);
-        return ffi::Error::Internal(std::string("CUDA malloc error (d_grad_cols): ") + cudaGetErrorString(cuda_err));
-      }
+        std::vector<uint64_t> grad_rows_host = h_rows;
+        std::vector<uint64_t> grad_cols_host = h_cols;
+        grad_rows_host[i] -= 1;
+        grad_cols_host[j] -= 1;
 
-      cuda_err = cudaMalloc(&d_entry_result, sizeof(cuDoubleComplex));
-      if (cuda_err != cudaSuccess)
-      {
-        cudaFree(d_grad_rows);
-        cudaFree(d_grad_cols);
-        return ffi::Error::Internal(std::string("CUDA malloc error (d_entry_result): ") + cudaGetErrorString(cuda_err));
-      }
+        uint64_t *d_grad_rows = nullptr;
+        uint64_t *d_grad_cols = nullptr;
+        cuDoubleComplex *d_entry_result = nullptr;
 
-      cudaMemsetAsync(d_entry_result, 0, sizeof(cuDoubleComplex), stream);
-      cuda_err = cudaMemcpyAsync(d_grad_rows, grad_rows_host.data(), n * sizeof(uint64_t), cudaMemcpyHostToDevice, stream);
-      if (cuda_err != cudaSuccess)
-      {
-        cudaFree(d_grad_rows);
-        cudaFree(d_grad_cols);
-        cudaFree(d_entry_result);
-        return ffi::Error::Internal(std::string("CUDA memcpy error (d_grad_rows): ") + cudaGetErrorString(cuda_err));
-      }
+        cuda_err = cudaMalloc(&d_grad_rows, n * sizeof(uint64_t));
+        if (cuda_err != cudaSuccess)
+          return ffi::Error::Internal(std::string("CUDA malloc error (d_grad_rows): ") + cudaGetErrorString(cuda_err));
 
-      cuda_err = cudaMemcpyAsync(d_grad_cols, grad_cols_host.data(), n * sizeof(uint64_t), cudaMemcpyHostToDevice, stream);
-      if (cuda_err != cudaSuccess)
-      {
-        cudaFree(d_grad_rows);
-        cudaFree(d_grad_cols);
-        cudaFree(d_entry_result);
-        return ffi::Error::Internal(std::string("CUDA memcpy error (d_grad_cols): ") + cudaGetErrorString(cuda_err));
-      }
-
-      cudaError_t sub_perm_cuda_err = calculatePermanent(stream, A_data, n,
-                                                         d_grad_rows, n,
-                                                         d_grad_cols, n,
-                                                         d_entry_result);
-
-      if (sub_perm_cuda_err != cudaSuccess)
-      {
-        cudaFree(d_grad_rows);
-        cudaFree(d_grad_cols);
-        cudaFree(d_entry_result);
-        if (sub_perm_cuda_err == cudaErrorInvalidValue)
+        cuda_err = cudaMalloc(&d_grad_cols, n * sizeof(uint64_t));
+        if (cuda_err != cudaSuccess)
         {
-          return ffi::Error::InvalidArgument(std::string("Invalid input during sub-permanent calculation: ") + cudaGetErrorString(sub_perm_cuda_err));
+          cudaFree(d_grad_rows);
+          return ffi::Error::Internal(std::string("CUDA malloc error (d_grad_cols): ") + cudaGetErrorString(cuda_err));
         }
-        else
+
+        cuda_err = cudaMalloc(&d_entry_result, sizeof(cuDoubleComplex));
+        if (cuda_err != cudaSuccess)
         {
-          return ffi::Error::Internal(std::string("CUDA error during sub-permanent calculation: ") + cudaGetErrorString(sub_perm_cuda_err));
+          cudaFree(d_grad_rows);
+          cudaFree(d_grad_cols);
+          return ffi::Error::Internal(std::string("CUDA malloc error (d_entry_result): ") + cudaGetErrorString(cuda_err));
         }
-      }
 
-      cuDoubleComplex h_entry_result;
-      cuda_err = cudaMemcpy(&h_entry_result, d_entry_result, sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost);
-      if (cuda_err != cudaSuccess)
-      {
+        cudaMemsetAsync(d_entry_result, 0, sizeof(cuDoubleComplex), stream);
+        cuda_err = cudaMemcpyAsync(d_grad_rows, grad_rows_host.data(), n * sizeof(uint64_t), cudaMemcpyHostToDevice, stream);
+        if (cuda_err != cudaSuccess)
+        {
+          cudaFree(d_grad_rows);
+          cudaFree(d_grad_cols);
+          cudaFree(d_entry_result);
+          return ffi::Error::Internal(std::string("CUDA memcpy error (d_grad_rows): ") + cudaGetErrorString(cuda_err));
+        }
+
+        cuda_err = cudaMemcpyAsync(d_grad_cols, grad_cols_host.data(), n * sizeof(uint64_t), cudaMemcpyHostToDevice, stream);
+        if (cuda_err != cudaSuccess)
+        {
+          cudaFree(d_grad_rows);
+          cudaFree(d_grad_cols);
+          cudaFree(d_entry_result);
+          return ffi::Error::Internal(std::string("CUDA memcpy error (d_grad_cols): ") + cudaGetErrorString(cuda_err));
+        }
+
+        cudaError_t sub_perm_cuda_err = calculatePermanent(stream, batch_A, n,
+                                                           d_grad_rows, n,
+                                                           d_grad_cols, n,
+                                                           d_entry_result);
+
+        if (sub_perm_cuda_err != cudaSuccess)
+        {
+          cudaFree(d_grad_rows);
+          cudaFree(d_grad_cols);
+          cudaFree(d_entry_result);
+          if (sub_perm_cuda_err == cudaErrorInvalidValue)
+            return ffi::Error::InvalidArgument(std::string("Invalid input during sub-permanent calculation: ") + cudaGetErrorString(sub_perm_cuda_err));
+          else
+            return ffi::Error::Internal(std::string("CUDA error during sub-permanent calculation: ") + cudaGetErrorString(sub_perm_cuda_err));
+        }
+
+        cuDoubleComplex h_entry_result;
+        cuda_err = cudaMemcpy(&h_entry_result, d_entry_result, sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost);
+        if (cuda_err != cudaSuccess)
+        {
+          cudaFree(d_grad_rows);
+          cudaFree(d_grad_cols);
+          cudaFree(d_entry_result);
+          return ffi::Error::Internal(std::string("CUDA memcpy error (h_entry_result): ") + cudaGetErrorString(cuda_err));
+        }
+
+        double scale = static_cast<double>(h_rows[i]) * static_cast<double>(h_cols[j]);
+        cuDoubleComplex scaled_result = cuCmul(h_entry_result, make_cuDoubleComplex(scale, 0.0));
+        cuDoubleComplex final_result = cuCmul(scaled_result, h_cot);
+
+        cuda_err = cudaMemcpyAsync(batch_ct_x + i * n + j, &final_result, sizeof(cuDoubleComplex), cudaMemcpyHostToDevice, stream);
+        if (cuda_err != cudaSuccess)
+        {
+          cudaFree(d_grad_rows);
+          cudaFree(d_grad_cols);
+          cudaFree(d_entry_result);
+          return ffi::Error::Internal(std::string("CUDA memcpy error (final_result): ") + cudaGetErrorString(cuda_err));
+        }
+
         cudaFree(d_grad_rows);
         cudaFree(d_grad_cols);
         cudaFree(d_entry_result);
-        return ffi::Error::Internal(std::string("CUDA memcpy error (h_entry_result): ") + cudaGetErrorString(cuda_err));
       }
-
-      double scale = static_cast<double>(h_rows[i]) * static_cast<double>(h_cols[j]);
-      cuDoubleComplex scaled_result = cuCmul(h_entry_result, make_cuDoubleComplex(scale, 0.0));
-
-      cuda_err = cudaMemcpyAsync(ct_x_data + i * n + j, &scaled_result, sizeof(cuDoubleComplex), cudaMemcpyHostToDevice, stream);
-      if (cuda_err != cudaSuccess)
-      {
-        cudaFree(d_grad_rows);
-        cudaFree(d_grad_cols);
-        cudaFree(d_entry_result);
-        return ffi::Error::Internal(std::string("CUDA memcpy error (scaled_result): ") + cudaGetErrorString(cuda_err));
-      }
-
-      cudaFree(d_grad_rows);
-      cudaFree(d_grad_cols);
-      cudaFree(d_entry_result);
     }
   }
 
   cuda_err = cudaStreamSynchronize(stream);
   if (cuda_err != cudaSuccess)
-  {
     return ffi::Error::Internal(std::string("CUDA stream sync error at end of PermBwdImpl: ") + cudaGetErrorString(cuda_err));
-  }
 
   return ffi::Error::Success();
 }
