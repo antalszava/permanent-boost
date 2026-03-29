@@ -490,6 +490,15 @@ ffi::Error PermBwdImpl(cudaStream_t stream, ffi::Buffer<ffi::C128> res_grad,
           return ffi::Error::Internal(std::string("CUDA memcpy error (d_grad_cols): ") + cudaGetErrorString(cuda_err));
         }
 
+        cuda_err = cudaStreamSynchronize(stream);
+        if (cuda_err != cudaSuccess)
+        {
+          cudaFree(d_grad_rows);
+          cudaFree(d_grad_cols);
+          cudaFree(d_entry_result);
+          return ffi::Error::Internal(std::string("CUDA stream sync error (before sub-permanent): ") + cudaGetErrorString(cuda_err));
+        }
+
         cudaError_t sub_perm_cuda_err = calculatePermanent(stream, batch_A, n,
                                                            d_grad_rows, n,
                                                            d_grad_cols, n,
